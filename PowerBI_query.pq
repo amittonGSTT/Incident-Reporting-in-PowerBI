@@ -1,43 +1,24 @@
-/*
-================================================================================
-GDW_query.sql — MDSO / LFPSE incident extract for Power BI (and similar tools)
-================================================================================
-Purpose
-  Build a flat, one-row-per-incident dataset of live LFPSE incidents (type 187)
-  that have an assigned "MDSO Team Incident Review (LFPSE)" workflow task.
-  Enriches each incident with location/region tags, incident-form answers,
-  Duty of Candour / MDSO workflow-form answers, and key workflow dates/users.
+// Power Query M script for Power BI — MDSO Incident Review data source
+// Paste into: Home > Transform Data > Advanced Editor
+//
+// Before using:
+//   1. Replace "YOUR_SERVER_NAME" with the actual SQL Server hostname/instance.
+//   2. The query targets the [Workforce] database (set in Sql.Database options).
+//   3. Date parameters (@StartDate / @EndDate) are embedded in the native SQL so
+//      the rolling 3-month window executes server-side. To change the lookback,
+//      edit the DATEADD offset inside the query text below.
 
-Grain
-  One returned row per EventID (incident), after DISTINCT + pivoted aggregates
-  and the final MDSO-assignment filter.
+let
+    // ─── Connection parameters ───────────────────────────────────────────────────
+    ServerName = "YOUR_SERVER_NAME",
+    DatabaseName = "Workforce",
 
-Companion documentation: GDW_query.md
-================================================================================
-*/
-
-USE [Workforce]
-GO
-
-SET ANSI_NULLS ON
-GO
-
-SET QUOTED_IDENTIFIER ON
-GO
-
-/* Rolling reporting window: created-date filter used by every CTE below.
-   End date uses < @EndDate + 1 day so the whole of "today" is included. */
-DECLARE @StartDate DATE = DATEADD(MONTH, -3, CAST(GETDATE() AS DATE)); -- change -3 to however many months back you want data for
-DECLARE @EndDate   DATE = CAST(GETDATE() AS DATE);                     -- today's date
+    // ─── Native SQL query (GDW_query.sql body without USE/GO/SET preamble) ──────
+    SqlQuery = "
+DECLARE @StartDate DATE = DATEADD(MONTH, -3, CAST(GETDATE() AS DATE));
+DECLARE @EndDate   DATE = CAST(GETDATE() AS DATE);
 
 WITH
-/* -----------------------------------------------------------------------------
-   BaseIncidents
-   Core incident attributes + location / region / clinical-group tag.
-   INNER JOINs require: a non-deleted form instance on the incident
-   (LinkedObjectType = 3 = incident) AND a region tag in IDs 1–6.
-   Incidents missing either are excluded from the whole result set.
------------------------------------------------------------------------------ */
 BaseIncidents AS
 (
     SELECT DISTINCT
@@ -57,10 +38,10 @@ BaseIncidents AS
     FROM rad.RiskManagement_Incident inc
     INNER JOIN rad.Templates_FormTemplateInstance inst
         ON inc.Id = inst.LinkedObjectId
-       AND inst.LinkedObjectType = 3 -- 3 = incident
+       AND inst.LinkedObjectType = 3
     INNER JOIN rad.Templates_FormTemplateInstanceValue form_values
         ON inst.Id = form_values.[TemplateInstanceId]
-		AND form_values.DeletedInstant IS NULL -- ignore soft-deleted answers
+        AND form_values.DeletedInstant IS NULL
     LEFT JOIN rad.Radar_Location loc
         ON inc.[LocationID] = loc.ID
     LEFT JOIN rad.Radar_Region reg
@@ -69,18 +50,13 @@ BaseIncidents AS
         ON tl.LinkedObjectID = reg.ID
     INNER JOIN rad.Radar_Tag tg
         ON tg.ID = tl.TagID
-       AND tg.ID IN (1,2,3,4,5,6) -- clinical-group region tags only
-    WHERE inc.[RecordStatus] = '2' -- live records
-      AND inc.[IncidentTypeId] = 187 -- LFPSE / incident type used by this extract
-	  AND inc.[Created] >= @StartDate
-	  AND inc.[Created] < DATEADD(DAY, 1, @EndDate) -- today's date +1 to include things from today
+       AND tg.ID IN (1,2,3,4,5,6)
+    WHERE inc.[RecordStatus] = '2'
+      AND inc.[IncidentTypeId] = 187
+      AND inc.[Created] >= @StartDate
+      AND inc.[Created] < DATEADD(DAY, 1, @EndDate)
 ),
 
-/* -----------------------------------------------------------------------------
-   RequiredFormValues
-   Long/narrow pull of selected incident-form field answers (patient/staff/
-   environment/visitor flags and tier_1 / tier_2 classification codes).
------------------------------------------------------------------------------ */
 RequiredFormValues AS
 (
     SELECT DISTINCT
@@ -93,10 +69,10 @@ RequiredFormValues AS
        AND inst.LinkedObjectType = 3
     INNER JOIN rad.Templates_FormTemplateInstanceValue fv
         ON inst.Id = fv.[TemplateInstanceId]
-		AND fv.DeletedInstant IS NULL
+        AND fv.DeletedInstant IS NULL
     WHERE inc.[RecordStatus] = '2'
       AND inc.[IncidentTypeId] = 187
-	  AND inc.[Created] >= @StartDate
+      AND inc.[Created] >= @StartDate
       AND inc.[Created] <  DATEADD(DAY, 1, @EndDate)
       AND fv.[FieldName] IN
       (
@@ -110,12 +86,6 @@ RequiredFormValues AS
       )
 ),
 
-/* -----------------------------------------------------------------------------
-   RequiredFormAgg
-   Pivot RequiredFormValues to one row per EventID.
-   MIN() is a deterministic pick when duplicate values exist for a field;
-   it is not necessarily the chronologically latest answer.
------------------------------------------------------------------------------ */
 RequiredFormAgg AS
 (
     SELECT
@@ -131,12 +101,6 @@ RequiredFormAgg AS
     GROUP BY EventID
 ),
 
-/* -----------------------------------------------------------------------------
-   WorkflowFormValues
-   Long/narrow pull of Duty of Candour and MDSO review fields from forms
-   attached to workflow user tasks (LinkedObjectType = 6 = workflow task),
-   via Workflow_Instance on the incident (LinkedObjectType = 3).
------------------------------------------------------------------------------ */
 WorkflowFormValues AS
 (
     SELECT DISTINCT
@@ -151,13 +115,13 @@ WorkflowFormValues AS
         ON inst.Id = tasks.WorkflowInstanceId
     INNER JOIN rad.Templates_FormTemplateInstance f_inst
         ON tasks.Id = f_inst.LinkedObjectId
-       AND f_inst.LinkedObjectType = 6 -- 6 = workflow user task
+       AND f_inst.LinkedObjectType = 6
     INNER JOIN rad.Templates_FormTemplateInstanceValue fv
         ON f_inst.Id = fv.[TemplateInstanceId]
-		AND fv.DeletedInstant IS NULL
+        AND fv.DeletedInstant IS NULL
     WHERE inc.[RecordStatus] = '2'
       AND inc.[IncidentTypeId] = 187
-	  AND inc.[Created] >= @StartDate
+      AND inc.[Created] >= @StartDate
       AND inc.[Created] <  DATEADD(DAY, 1, @EndDate)
       AND fv.[FieldName] IN
       (
@@ -172,16 +136,11 @@ WorkflowFormValues AS
           'VpaLHXhH2Gk0F7Bx_has-the-outcome-of-the-review-or',
           'YLsj5YIJcqEaZGyB_date-outcome-of-review-or-invest',
           'oao7ugaoexkkQ41S_reason-outcome-of-review-or-inve',
-		  -- MDSO investigation date fields (confirm codes if forms change)
           'sXRWExCBXMwFClfp_start-of-mdso-investigation',
           'o2WJulzEqABvEMOG_end-of-mdso-investigation'
-		)
+      )
 ),
 
-/* -----------------------------------------------------------------------------
-   WorkflowFormAgg
-   Pivot WorkflowFormValues to one row per EventID (same MIN() caveat as above).
------------------------------------------------------------------------------ */
 WorkflowFormAgg AS
 (
     SELECT
@@ -203,11 +162,6 @@ WorkflowFormAgg AS
     GROUP BY EventID
 ),
 
-/* -----------------------------------------------------------------------------
-   WorkflowDateAgg
-   Due / completed dates (and MDSO assignee ID) for three named workflow tasks.
-   LEFT JOIN keeps incidents that have a workflow instance but not all tasks.
------------------------------------------------------------------------------ */
 WorkflowDateAgg AS
 (
     SELECT
@@ -216,11 +170,9 @@ WorkflowDateAgg AS
         ,MIN(CASE WHEN tasks.[Description] = 'Governance Triage' THEN tasks.[CompletionDateTime] END) AS [GovernanceTriage_CompletedDate]
         ,MIN(CASE WHEN tasks.[Description] = 'Local Incident Review' THEN tasks.[DueDate] END) AS [LocalIncidentReview_DueDate]
         ,MIN(CASE WHEN tasks.[Description] = 'Local Incident Review' THEN tasks.[CompletionDateTime] END) AS [LocalIncidentReview_CompletedDate]
-		-------------------------
         ,MIN(CASE WHEN tasks.[Description] = 'MDSO Team Incident Review (LFPSE)' THEN tasks.[DueDate] END) AS [MDSOTeamIncidentReview_DueDate]
         ,MIN(CASE WHEN tasks.[Description] = 'MDSO Team Incident Review (LFPSE)' THEN tasks.[CompletionDateTime] END) AS [MDSOTeamIncidentReview_CompletedDate]
-		,MIN(CASE WHEN tasks.[Description] = 'MDSO Team Incident Review (LFPSE)' THEN tasks.[AssignedToUserId] END) AS [MDSOTeamIncidentReview_AssignedTo]
-		-------------------------
+        ,MIN(CASE WHEN tasks.[Description] = 'MDSO Team Incident Review (LFPSE)' THEN tasks.[AssignedToUserId] END) AS [MDSOTeamIncidentReview_AssignedTo]
     FROM rad.RiskManagement_Incident inc
     INNER JOIN rad.Workflow_Instance inst
         ON inc.Id = inst.LinkedObjectId
@@ -228,26 +180,20 @@ WorkflowDateAgg AS
     LEFT JOIN rad.Workflow_UserTask tasks
         ON inst.Id = tasks.WorkflowInstanceId
        AND tasks.[Description] IN ('Governance Triage', 'Local Incident Review', 'MDSO Team Incident Review (LFPSE)')
-    WHERE inc.[RecordStatus] = '2' -- refers to live records
+    WHERE inc.[RecordStatus] = '2'
       AND inc.[IncidentTypeId] = 187
-	  AND inc.[Created] >= @StartDate
+      AND inc.[Created] >= @StartDate
       AND inc.[Created] <  DATEADD(DAY, 1, @EndDate)
     GROUP BY inc.ID
 ),
 
-/* -----------------------------------------------------------------------------
-   WorkflowUserAgg
-   Display names of users assigned to the same three workflow tasks.
------------------------------------------------------------------------------ */
 WorkflowUserAgg AS
 (
     SELECT
          inc.ID AS EventID
         ,MIN(CASE WHEN tasks.[Description] = 'Governance Triage' THEN u.[DisplayName] END) AS [GovernanceTriage_User]
         ,MIN(CASE WHEN tasks.[Description] = 'Local Incident Review' THEN u.[DisplayName] END) AS [LocalIncidentReview_User]
-		-----------------------
-		,MIN(CASE WHEN tasks.[Description] = 'MDSO Team Incident Review (LFPSE)' THEN u.[DisplayName] END) AS [MDSO Team Incident Review (LFPSE)]
-		-----------------------
+        ,MIN(CASE WHEN tasks.[Description] = 'MDSO Team Incident Review (LFPSE)' THEN u.[DisplayName] END) AS [MDSO Team Incident Review (LFPSE)]
     FROM rad.RiskManagement_Incident inc
     INNER JOIN rad.Workflow_Instance inst
         ON inc.Id = inst.LinkedObjectId
@@ -259,17 +205,11 @@ WorkflowUserAgg AS
         ON u.ID = tasks.[AssignedToUserId]
     WHERE inc.[RecordStatus] = '2'
       AND inc.[IncidentTypeId] = 187
-	  AND inc.[Created] >= @StartDate
+      AND inc.[Created] >= @StartDate
       AND inc.[Created] <  DATEADD(DAY, 1, @EndDate)
     GROUP BY inc.ID
 ),
 
-/* -----------------------------------------------------------------------------
-   Tier2Lookup
-   Map tier_2 value codes to human-readable descriptions from VwFormTemplate.
-   Prefer 'LFPSE Incident Form' over the older NHS Event / GSTT Option 3 form
-   when the same ValueCD appears in more than one template (rn = 1).
------------------------------------------------------------------------------ */
 Tier2Lookup AS
 (
     SELECT *
@@ -299,13 +239,6 @@ Tier2Lookup AS
     WHERE rn = 1
 )
 
-/* -----------------------------------------------------------------------------
-   Final SELECT
-   Assemble base incident + pivoted form/workflow columns.
-   Classification: prefer template description (ValueDSC); fall back to raw code.
-   Tier 2 join strips spaces and aligns collations for robust matching.
-   Final WHERE keeps only incidents with an MDSO review assignee.
------------------------------------------------------------------------------ */
 SELECT
      X.[EventID]
     ,X.[EventURL]
@@ -320,24 +253,19 @@ SELECT
     ,X.[Location]
     ,X.[Region]
     ,X.[ClinicalGroup_RegionTag]
-
-	-- Prefer lookup description; otherwise keep the stored form code
-	,COALESCE(
-		ic.[ValueDSC] COLLATE DATABASE_DEFAULT,
-		a.[tier_1] COLLATE DATABASE_DEFAULT
-	) AS [IncidentClassification]
-
-	,COALESCE(
-		isc.[ValueDSC] COLLATE DATABASE_DEFAULT,
-		a.[tier_2] COLLATE DATABASE_DEFAULT
-	) AS [IncidentSub-Classification]
-
+    ,COALESCE(
+        ic.[ValueDSC] COLLATE DATABASE_DEFAULT,
+        a.[tier_1] COLLATE DATABASE_DEFAULT
+    ) AS [IncidentClassification]
+    ,COALESCE(
+        isc.[ValueDSC] COLLATE DATABASE_DEFAULT,
+        a.[tier_2] COLLATE DATABASE_DEFAULT
+    ) AS [IncidentSub-Classification]
     ,a.[Patient_Involved] AS [DoesThisEventInvolveAPatient]
     ,a.[LFPSE_Patient_Involved] AS [DidIncidentOccurToPatientUnderTrustCare]
     ,a.[staff_related] AS [DoesThisIncidentInvolveActualOrPotentialHarmToStaff]
     ,a.[environment_related] AS [DoesThisIncidentInvolveActualOrPotentialHarmToEstatesFacilitiesOrTheEnvironment]
     ,a.[visitors_related] AS [DoesThisIncidentInvolveActualOrPotentialHarmToVisitorsMembersOfThePublicRelatives]
-
     ,d.[duty-of-candour] AS [IndicationOfWhetherTheAdverseEventMeetsTheRequirementsForDutyOfCandour]
     ,d.[-azp461PF-3UGjUP_please-select-the-reason-why-dut] AS [PleaseSelectReasonWhyDutyOfCandourIsNotRequired]
     ,d.[Hx74MY6bSrifRlA3_was-a-verbal-apology-given-by-wa] AS [WasAVerbalApologyGivenByWayOfDutyOfCandour]
@@ -349,22 +277,17 @@ SELECT
     ,d.[VpaLHXhH2Gk0F7Bx_has-the-outcome-of-the-review-or] AS [HasTheOutcomeOfTheReviewOrInvestigationBeenSharedWithTheRelevantPerson]
     ,d.[YLsj5YIJcqEaZGyB_date-outcome-of-review-or-invest] AS [DateOutcomeOfReviewOrInvestigationShared]
     ,d.[oao7ugaoexkkQ41S_reason-outcome-of-review-or-inve] AS [ReasonOutcomeOfReviewOrInvestigationNotSent]
-
     ,wd.[GovernanceTriage_DueDate]
     ,wd.[GovernanceTriage_CompletedDate]
     ,wd.[LocalIncidentReview_DueDate]
     ,wd.[LocalIncidentReview_CompletedDate]
-
     ,wu.[GovernanceTriage_User]
     ,wu.[LocalIncidentReview_User]
-
-	,wd.[MDSOTeamIncidentReview_DueDate]        AS [MDSOTeamIncidentReview_DueDate]
-    ,wd.[MDSOTeamIncidentReview_CompletedDate]  AS [MDSOTeamIncidentReview_CompletedDate]
-    ,wd.[MDSOTeamIncidentReview_AssignedTo]       AS [MDSOTeamIncidentReview_AssignedTo]
-
+    ,wd.[MDSOTeamIncidentReview_DueDate]
+    ,wd.[MDSOTeamIncidentReview_CompletedDate]
+    ,wd.[MDSOTeamIncidentReview_AssignedTo]
     ,d.[sXRWExCBXMwFClfp_start-of-mdso-investigation] AS [StartDateOfMDSOReview]
     ,d.[o2WJulzEqABvEMOG_end-of-mdso-investigation]   AS [EndDateOfMDSOReview]
-
 FROM BaseIncidents X
 LEFT JOIN RequiredFormAgg a
     ON X.[EventID] = a.[EventID]
@@ -381,5 +304,27 @@ LEFT JOIN [rad].[VwFormTemplate] ic
 LEFT JOIN Tier2Lookup isc
     ON REPLACE(a.[tier_2], ' ', '') COLLATE database_default
      = REPLACE(isc.[ValueCD], ' ', '') COLLATE database_default
+WHERE wd.[MDSOTeamIncidentReview_AssignedTo] IS NOT NULL
+",
 
-WHERE wd.[MDSOTeamIncidentReview_AssignedTo] IS NOT NULL; -- ONLY MDSO REVIEWED INCIDENTS RETURNED
+    // ─── Execute the query ───────────────────────────────────────────────────────
+    Source = Sql.Database(ServerName, DatabaseName, [Query = SqlQuery]),
+
+    // ─── Type transformations ────────────────────────────────────────────────────
+    TypedColumns = Table.TransformColumnTypes(Source, {
+        {"EventID", Int64.Type},
+        {"EventDate", type datetime},
+        {"ClosedDate", type datetime},
+        {"CreatedDate", type datetime},
+        {"GovernanceTriage_DueDate", type datetime},
+        {"GovernanceTriage_CompletedDate", type datetime},
+        {"LocalIncidentReview_DueDate", type datetime},
+        {"LocalIncidentReview_CompletedDate", type datetime},
+        {"MDSOTeamIncidentReview_DueDate", type datetime},
+        {"MDSOTeamIncidentReview_CompletedDate", type datetime},
+        {"MDSOTeamIncidentReview_AssignedTo", Int64.Type},
+        {"StartDateOfMDSOReview", type date},
+        {"EndDateOfMDSOReview", type date}
+    })
+in
+    TypedColumns

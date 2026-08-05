@@ -1,0 +1,195 @@
+// ============================================================================
+// PowerBI_measures.dax
+// DAX calculated columns and measures for the MDSO Incident Review report.
+// Paste into Power BI Desktop via: Modeling > New Column / New Measure.
+// ============================================================================
+// Table name assumed: 'Incidents'
+// Rename to match your Power Query table name if different.
+// ============================================================================
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALCULATED COLUMNS
+// Add via: Modeling > New Column (with the Incidents table selected)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// --- ReviewDuration (days) ---------------------------------------------------
+// Number of days between when the MDSO review started and when it ended.
+// NULL if either date is blank.
+ReviewDuration =
+IF(
+    NOT ISBLANK( Incidents[StartDateOfMDSOReview] )
+        && NOT ISBLANK( Incidents[EndDateOfMDSOReview] ),
+    DATEDIFF( Incidents[StartDateOfMDSOReview], Incidents[EndDateOfMDSOReview], DAY ),
+    BLANK()
+)
+
+
+// --- ReviewTurnaround (days) -------------------------------------------------
+// Number of days between incident creation and the end of MDSO review.
+// This is the end-to-end turnaround metric used in the Python analysis.
+ReviewTurnaround =
+IF(
+    NOT ISBLANK( Incidents[CreatedDate] )
+        && NOT ISBLANK( Incidents[EndDateOfMDSOReview] ),
+    DATEDIFF( Incidents[CreatedDate], Incidents[EndDateOfMDSOReview], DAY ),
+    BLANK()
+)
+
+
+// --- TurnaroundBin -----------------------------------------------------------
+// Bucket ReviewTurnaround into the same bins as the Python histogram.
+TurnaroundBin =
+VAR _days = Incidents[ReviewTurnaround]
+RETURN
+    SWITCH(
+        TRUE(),
+        ISBLANK( _days ), BLANK(),
+        _days <= 4,  "0-4",
+        _days <= 9,  "5-9",
+        _days <= 14, "10-14",
+        _days <= 19, "15-19",
+        _days <= 24, "20-24",
+        _days <= 29, "25-29",
+        "30+"
+    )
+
+
+// --- TurnaroundBinSort -------------------------------------------------------
+// Numeric sort order for the TurnaroundBin column (use "Sort by Column").
+TurnaroundBinSort =
+VAR _days = Incidents[ReviewTurnaround]
+RETURN
+    SWITCH(
+        TRUE(),
+        ISBLANK( _days ), BLANK(),
+        _days <= 4,  1,
+        _days <= 9,  2,
+        _days <= 14, 3,
+        _days <= 19, 4,
+        _days <= 24, 5,
+        _days <= 29, 6,
+        7
+    )
+
+
+// --- ReviewStatus ------------------------------------------------------------
+// Categorical status matching the Python stacked-bar segments.
+ReviewStatus =
+SWITCH(
+    TRUE(),
+    NOT ISBLANK( Incidents[EndDateOfMDSOReview] ), "Review Completed",
+    NOT ISBLANK( Incidents[StartDateOfMDSOReview] ), "Review In Progress",
+    "Review Not Started"
+)
+
+
+// --- ReviewStatusSort --------------------------------------------------------
+// Numeric sort order for ReviewStatus (stacked bar ordering).
+ReviewStatusSort =
+SWITCH(
+    Incidents[ReviewStatus],
+    "Review Completed", 1,
+    "Review In Progress", 2,
+    "Review Not Started", 3
+)
+
+
+// --- CreatedMonth ------------------------------------------------------------
+// First day of the month the incident was created (for slicer / grouping).
+CreatedMonth =
+EOMONTH( Incidents[CreatedDate], -1 ) + 1
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MEASURES
+// Add via: Modeling > New Measure
+// These respond dynamically to any date slicer filtering on CreatedDate.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// --- N Incidents Created -----------------------------------------------------
+N Incidents Created =
+COUNTROWS( Incidents )
+
+
+// --- N Reviews Started -------------------------------------------------------
+N Reviews Started =
+CALCULATE(
+    COUNTROWS( Incidents ),
+    NOT ISBLANK( Incidents[StartDateOfMDSOReview] )
+)
+
+
+// --- N Reviews Completed -----------------------------------------------------
+N Reviews Completed =
+CALCULATE(
+    COUNTROWS( Incidents ),
+    NOT ISBLANK( Incidents[EndDateOfMDSOReview] )
+)
+
+
+// --- Avg Review Duration (Days) ----------------------------------------------
+Avg Review Duration (Days) =
+AVERAGE( Incidents[ReviewDuration] )
+
+
+// --- Avg Turnaround (Days) ---------------------------------------------------
+Avg Turnaround (Days) =
+AVERAGE( Incidents[ReviewTurnaround] )
+
+
+// --- % Turnaround > 30 Days -------------------------------------------------
+// Percentage of completed reviews where turnaround exceeds 30 days.
+% Turnaround > 30 Days =
+VAR _completed =
+    CALCULATE(
+        COUNTROWS( Incidents ),
+        NOT ISBLANK( Incidents[ReviewTurnaround] )
+    )
+VAR _over30 =
+    CALCULATE(
+        COUNTROWS( Incidents ),
+        Incidents[ReviewTurnaround] > 30
+    )
+RETURN
+    IF( _completed > 0, DIVIDE( _over30, _completed ), BLANK() )
+
+
+// --- N Pending at Month Start ------------------------------------------------
+// Incidents created BEFORE the selected month whose review had NOT ended
+// by the start of that month. Requires the user to select a single month
+// via the CreatedMonth slicer (or defaults to the current month).
+N Pending at Month Start =
+VAR _selectedMonth =
+    IF(
+        HASONEVALUE( Incidents[CreatedMonth] ),
+        VALUES( Incidents[CreatedMonth] ),
+        DATE( YEAR( TODAY() ), MONTH( TODAY() ), 1 )
+    )
+RETURN
+    CALCULATE(
+        COUNTROWS( Incidents ),
+        ALL( Incidents ),
+        Incidents[CreatedDate] < _selectedMonth,
+        OR(
+            Incidents[EndDateOfMDSOReview] >= _selectedMonth,
+            ISBLANK( Incidents[EndDateOfMDSOReview] )
+        )
+    )
+
+
+// --- % Short Turnaround (< 3 days) ------------------------------------------
+// Percentage of completed reviews where turnaround is under 3 days.
+% Short Turnaround =
+VAR _completed =
+    CALCULATE(
+        COUNTROWS( Incidents ),
+        NOT ISBLANK( Incidents[ReviewTurnaround] )
+    )
+VAR _short =
+    CALCULATE(
+        COUNTROWS( Incidents ),
+        Incidents[ReviewTurnaround] < 3
+    )
+RETURN
+    IF( _completed > 0, DIVIDE( _short, _completed ), BLANK() )
